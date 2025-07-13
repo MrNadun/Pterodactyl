@@ -1,0 +1,288 @@
+#!/bin/bash
+# write by mr.nadun
+# ANSI color codes
+BLUE='\033[0;34m'
+BOLD_BLUE='\033[1;34m'
+LIGHT_BLUE='\033[0;94m'
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Print a fancy header
+echo -e "${BOLD_BLUE}"
+echo "
+          
+                                                     
+888b     d888              888b    888               888                   
+8888b   d8888              8888b   888               888                   
+88888b.d88888              88888b  888               888                   
+888Y88888P888 888d888      888Y88b 888  8888b.   .d88888 888  888 88888b.  
+888 Y888P 888 888P        888 Y88b888     88b d88  888 888  888 888 88b 
+888  Y8P  888 888          888  Y88888 .d888888 888  888 888  888 888  888 
+888       888 888          888   Y8888 888  888 Y88b 888 Y88b 888 888  888 
+888       888 888          888    Y888  Y888888   Y88888   Y88888 888  888 
+                                                                           
+                                                                           
+                                                                                                                                
+                                                     
+                                                     
+"
+echo -e "${NC}"
+echo -e "${CYAN} 🍀 Pterodactyl Panel Installation Script${NC}"
+echo "📌 මෙම ස්ක්‍රිප්ට් එක මඟින් පැනල් Components පමණක් ස්ථාපනය කරනු ඇත."
+echo
+
+# Database configuration
+DB_USER="pterodactyl"
+DB_PASS="yourPassword"
+DB_NAME="panel"
+DB_HOST="127.0.0.1"
+ROOT_PASS="root"
+
+# Check if script is run as root
+if [ "$(id -u)" != "0" ]; then
+   echo -e "${RED} 💉 මෙම ස්ක්‍රිප්ට් එක root ලෙස ක්‍රියාත්මක කළ යුතුය.${NC}" 
+   exit 1
+fi
+
+echo -e "${CYAN}💉 dependencies ස්ථාපනය කිරීම...${NC}"
+apt -y install software-properties-common curl apt-transport-https ca-certificates gnupg
+
+# Add PHP repository
+echo -e "${CYAN}💉 Adding PHP repository...${NC}"
+add-apt-repository -y ppa:ondrej/php
+
+# Add Redis repository
+echo -e "${CYAN}💉 Adding Redis repository...${NC}"
+curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/redis.list
+
+# Add MariaDB repository
+echo -e "${CYAN}💉 Adding MariaDB repository...${NC}"
+curl -LsS https://r.mariadb.com/downloads/mariadb_repo_setup | bash
+
+# Update package lists
+echo -e "${CYAN}💉 Updating package lists...${NC}"
+apt update
+
+# Install required packages
+echo -e "${CYAN}💉 Installing required packages...${NC}"
+apt -y install php8.3 php8.3-{common,cli,gd,mysql,mbstring,bcmath,xml,fpm,curl,zip} mariadb-server nginx tar unzip git redis-server
+
+# Install Composer
+echo -e "${CYAN}💉 Installing Composer...${NC}"
+curl -sS https://getcomposer.org/installer | php -- --install-dir=/usr/local/bin --filename=composer
+
+# Start MariaDB service
+echo -e "${CYAN}💉 Starting MariaDB service...${NC}"
+# Ensure proper permissions for MySQL directory
+mkdir -p /var/run/mysqld
+chown mysql:mysql /var/run/mysqld
+chmod 755 /var/run/mysqld
+
+# Check for and remove stale socket if exists
+if [ -e /var/run/mysqld/mysqld.sock ]; then
+    rm /var/run/mysqld/mysqld.sock
+fi
+
+# Kill any existing MySQL processes
+if pgrep mysqld > /dev/null || pgrep mariadbd > /dev/null; then
+    echo -e "${CYAN}💉 Stopping any existing MySQL processes...${NC}"
+    pkill mysqld
+    pkill mariadbd
+    sleep 2
+fi
+
+# Start MariaDB service in background
+echo -e "${CYAN}💉 Starting MariaDB service...${NC}"
+service mysql start || /etc/init.d/mysql start || mariadbd --user=mysql &
+sleep 5
+
+# Configure MariaDB
+echo -e "${CYAN}💉 Configuring MariaDB...${NC}"
+mysql -u root <<EOF
+ALTER USER 'root'@'localhost' IDENTIFIED BY '${ROOT_PASS}';
+CREATE USER '${DB_USER}'@'${DB_HOST}' IDENTIFIED BY '${DB_PASS}';
+CREATE DATABASE ${DB_NAME};
+GRANT ALL PRIVILEGES ON ${DB_NAME}.* TO '${DB_USER}'@'${DB_HOST}' WITH GRANT OPTION;
+FLUSH PRIVILEGES;
+EOF
+
+# පැනල් එක සඳහා Directory සාදන්න
+echo -e "${CYAN}💉 Pterodactyl පැනලය සකසමින් පවතී...${NC}"
+mkdir -p /var/www/pterodactyl
+cd /var/www/pterodactyl
+
+#  පැනල් ගොනු බාගත කර උපුටා ගන්න
+echo -e "${CYAN}පැනල් File Download කරමින්...${NC}"
+curl -Lo panel.tar.gz https://github.com/pterodactyl/panel/releases/latest/download/panel.tar.gz
+tar -xzvf panel.tar.gz
+chmod -R 755 storage/* bootstrap/cache/
+
+# Setup environment configuration
+echo -e "${CYAN}💉 Setting up environment configuration...${NC}"
+cp .env.example .env
+COMPOSER_ALLOW_SUPERUSER=1 composer install --no-dev --optimize-autoloader
+
+# Generate application key
+echo -e "${CYAN}💉 Generating application key...${NC}"
+php artisan key:generate --force
+
+# Configure environment
+echo -e "${CYAN}💉 Running environment setup...${NC}"
+php artisan p:environment:setup
+php artisan p:environment:database
+
+# Run database migrations
+echo -e "${CYAN}💉 Running database migrations...${NC}"
+php artisan migrate --seed --force
+
+# Create admin user
+echo -e "${CYAN}💉 Creating admin user...${NC}"
+php artisan p:user:make
+
+# Configure NGINX
+echo -e "${CYAN}💉 Setting up NGINX configuration...${NC}"
+cat > /etc/nginx/sites-available/pterodactyl.conf <<'EOL'
+server {
+    listen 80;
+    server_name your-domain.com;
+    
+    root /var/www/pterodactyl/public;
+    index index.php;
+    
+    access_log /var/log/nginx/pterodactyl.access.log;
+    error_log /var/log/nginx/pterodactyl.error.log;
+    
+    # allow larger file uploads and longer script runtimes
+    client_max_body_size 100m;
+    client_body_timeout 120s;
+    
+    sendfile off;
+    
+    # SSL Configuration
+    # ssl_certificate /etc/letsencrypt/live/your-domain.com/fullchain.pem;
+    # ssl_certificate_key /etc/letsencrypt/live/your-domain.com/privkey.pem;
+    # ssl_session_cache shared:SSL:10m;
+    # ssl_protocols TLSv1.2 TLSv1.3;
+    # ssl_ciphers "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
+    # ssl_prefer_server_ciphers on;
+    
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+    
+    location ~ \.php$ {
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/var/run/php/php8.3-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param PHP_VALUE "upload_max_filesize = 100M \n post_max_size=100M";
+        fastcgi_read_timeout 240;
+    }
+    
+    location ~ /\.ht {
+        deny all;
+    }
+}
+EOL
+
+# අඩවිය සක්‍රීය කරන්න
+ln -s /etc/nginx/sites-available/pterodactyl.conf /etc/nginx/sites-enabled/pterodactyl.conf
+
+# සේවා ආරම්භ කරන්න
+echo -e "${CYAN}🍀 Starting services...${NC}"
+# Redis ආරම්භ කරන්න
+redis-server --daemonize yes
+
+# Start PHP-FPM
+service php8.3-fpm start || /etc/init.d/php8.3-fpm start
+
+# Start Nginx
+service nginx start || /etc/init.d/nginx start
+
+# Setup queue worker
+echo -e "${CYAN}🍀 Setting up queue worker...${NC}"
+cat > /etc/init.d/pteroq <<'EOL'
+#!/bin/bash
+### BEGIN INIT INFO
+# Provides:          pteroq
+# Required-Start:    $remote_fs $syslog
+# Required-Stop:     $remote_fs $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Pterodactyl Queue Worker
+### END INIT INFO
+
+user="www-data"
+dir="/var/www/pterodactyl"
+cmd="/usr/bin/php /var/www/pterodactyl/artisan queue:work --queue=high,standard,low --sleep=3 --tries=3"
+pid_file="/var/run/pteroq.pid"
+log_file="/var/log/pteroq.log"
+
+case "$1" in
+    start)
+        if [ -f $pid_file ]; then
+            echo "Already running"
+            exit 1
+        fi
+        echo "Starting Pterodactyl Queue Worker..."
+        cd $dir
+        if [ -n "$user" ]; then
+            sudo -u $user $cmd >> $log_file 2>&1 & 
+        else
+            $cmd >> $log_file 2>&1 &
+        fi
+        echo $! > $pid_file
+        ;;
+    stop)
+        if [ ! -f $pid_file ]; then
+            echo "Not running"
+            exit 1
+        fi
+        echo "Stopping Pterodactyl Queue Worker..."
+        kill $(cat $pid_file)
+        rm $pid_file
+        ;;
+    restart)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    status)
+        if [ -f $pid_file ]; then
+            pid=$(cat $pid_file)
+            if ps -p $pid > /dev/null; then
+                echo "Running with PID $pid"
+                exit 0
+            else
+                echo "Not running (stale PID file)"
+                exit 1
+            fi
+        else
+            echo "Not running"
+            exit 1
+        fi
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart|status}"
+        exit 1
+        ;;
+esac
+
+exit 0
+EOL
+
+chmod +x /etc/init.d/pteroq
+update-rc.d pteroq defaults
+/etc/init.d/pteroq start
+
+echo -e "${GREEN}📌 Pterodactyl පැනලය සාර්ථකව ස්ථාපනය කර ඇත.!${NC}"
+echo -e "${CYAN}panel URL: http://your-domain.com${NC}"
+echo -e "${CYAN}කරුණාකර ඔබගේ සත්‍ය Domain එක සමඟ NGINX යාවත්කාලීන කරන්න. 'your-domain.com'${NC}"
+echo -e "${CYAN}HTTPS භාවිතා කිරීමට, NGINX වින්‍යාසය තුළ SSL වින්‍යාසය අදහස් දැක්වීම ඉවත් කර යාවත්කාලීන කරන්න.${NC}"
+echo -e "${CYAN}ඔබගේ පැනලය දේශීයව ද ලබා ගත හැකිය: http://localhost${NC}"
+echo -e "${CYAN}If you need to manually start the development server ඔබට Deploment server එක manually start කිරීමට අවශ්‍ය නම්:${NC}"
+echo -e "${CYAN}cd /var/www/pterodactyl && php artisan serve --host=0.0.0.0 --port=8080${NC}"
